@@ -33,7 +33,7 @@ small = 1e-12
 
 # ========== Utility functions ==========
 def compute_theta(T_da, plevel):
-    """Calculate potential temperature: theta"""
+    """ Calculate potential temperature: theta"""
     p_pa = plevel * 100.0
     exponent = Rd / cp
     theta = T_da * (p0 / p_pa) ** exponent
@@ -41,7 +41,7 @@ def compute_theta(T_da, plevel):
     return theta
 
 def compute_density(T_da, plevel):
-    """According to ERA5 T and pressure_level calculate density: rho"""
+    """ According to ERA5 T and pressure_level, calculate density: rho"""
     rho_vals = np.zeros_like(T_da.values)
     for i, p_hPa in enumerate(plevel.values):
         p_Pa = p_hPa * 100.0
@@ -49,7 +49,7 @@ def compute_density(T_da, plevel):
     return xr.DataArray(rho_vals, coords=T_da.coords, dims=T_da.dims, name='rho')
 
 def pressure_to_height(GP):
-    """ According to ERA5 GP and g calculate GPH to represent height """
+    """ According to ERA5 GP and g, calculate GPH to represent height """
     return GP / g
 
 def vertical_gradient(var, z):
@@ -82,9 +82,9 @@ def process_year(y):
 
     for fn in (fnT, fnZ, fnU, fnV, fnW):
         if not os.path.exists(fn):
-            raise FileNotFoundError(f"missing file: {fn}")
-
-    chunks = {'valid_time': chunk_time} if use_dask else None
+            raise FileNotFoundError(f"缺少文件: {fn}")
+    
+    chunks = {'valid_time': chunk_time} if use_dask else None  # 不使用 dask  # 
     dsT = xr.open_dataset(fnT, chunks=chunks)
     dsZ = xr.open_dataset(fnZ, chunks=chunks)
     dsU = xr.open_dataset(fnU, chunks=chunks)
@@ -97,7 +97,7 @@ def process_year(y):
     f = 2 * Omega * np.sin(lat_rad)
     cosphi = np.cos(lat_rad)
 
-    # potiential temperature, density, height 
+    # potential temperature, density, height 
     theta = compute_theta(ds['t'], ds['pressure_level'])
     ds['theta'] = theta
     ds_zm = ds.mean(dim='longitude')
@@ -133,9 +133,9 @@ def process_year(y):
     F_phi_vals = rho_vals * r * cos3d * (du_dz_vals * vtheta_vals / dtheta_dz_vals - uv_vals)
     F_z_vals   = rho_vals * r * cos3d * ((f3d - ducos3d_dphi_vals / (r * cos3d)) * vtheta_vals / dtheta_dz_vals - uw_vals)
 
-    # divF_y：meridional divergence ∂(Fφ cosφ)/∂φ
+    # divF_y： meridional divergence ∂(Fφ cosφ)/∂φ
     dFphi_cos_dphi = np.gradient(F_phi_vals * cos3d, lat_rad.values, axis=2, edge_order=1)
-    # divF_z：vertical divergence ∂Fz/∂z 
+    # divF_z： vertical divergence ∂Fz/∂z 
     dFz_dz = vertical_gradient(F_z_vals, z_vals)
     # EP Flux divergence
     divF = dFphi_cos_dphi/(r*cos3d) + dFz_dz
@@ -152,9 +152,11 @@ def process_year(y):
     if -90.0 in w_resi_da.latitude.values:
         w_resi_da.loc[:, :, -90.0] = np.nan
     omega_res = - rho_vals * g * w_resi_da
-
+    ad_heating = - w_resi_da * dtheta_dz_vals
+    
     # ========== Save ==========
     xr.Dataset({'uv_eddy': uv_eddy, 'vtheta_eddy': vtheta_eddy, 'uw_eddy': uw_eddy}).to_netcdf(os.path.join(out_dir, f'ERA5_eddies_{y}.nc'))
+    xr.Dataset({'rho': rho_da}).to_netcdf(os.path.join(out_dir, f'ERA5_air_density_{y}.nc'))
     ds_ep = xr.Dataset(
     {
         'F_phi': xr.DataArray(
@@ -204,7 +206,8 @@ def process_year(y):
 
     xr.Dataset({'v_resi': (('valid_time','pressure_level','latitude'), v_resi),
                 'w_resi': w_resi_da,
-                'omega_res': omega_res
+                'omega_res': omega_res,
+                'ad_heating': ad_heating
                }).to_netcdf(os.path.join(out_dir, f'ERA5_TEM_{y}.nc'))
     print(f"[INFO] Year {y} saved successfully.")
  
@@ -214,11 +217,11 @@ Parallel(n_jobs=4)(
 )
 
 # more details:
-# Generally, the wave-forcing (dudt) is drawed in the pressure-latitude figure. 
+# Generally, the wave-forcing (dudt) is drawn in the pressure-latitude figure. 
 # G.J., B. (2020): 
-# For the clear view of E–P flux vectors in throughout the stratosphere
+# For the clear view of E–P flux vectors throughout the stratosphere
 # E–P flux vectors are multiplied by (exp z/H) (is approximately equal to density)  (Mechoso et al., 1985)
-# The vertical component of E–P flux is magnified by a factor 150 with respect to horizontal component (Randel and Boville, 1987)
+# The vertical component of E–P flux is magnified by a factor of 150 with respect to the horizontal component (Randel and Boville, 1987)
 
 import matplotlib.pyplot as plt
 def plot_epflux(ds, dudt, F_phi_vals, F_z_vals, rho_vals):
@@ -255,3 +258,4 @@ def plot_epflux(ds, dudt, F_phi_vals, F_z_vals, rho_vals):
     cbar.set_label('EPFD (m/s/day)')
 
     plt.show()
+
