@@ -48,7 +48,7 @@ def lat6090_climatology(data_dir, data_name, output_file, output_anom, years, va
     var_name = "u"
     level_bounds = (1000, 1)
     df_varname = "U6090"
-    U_df_all, U_clim_stats = lat6090_climatology(data_dir, data_name, years, output_file, output_anom, var_name, level_bounds, df_varname)
+    U_df_all, U_clim_stats = lat6090_climatology(data_dir, data_name, output_file, output_anom, years, var_name, level_bounds, lat_range, df_varname)
     """ 
 
     all_data = []
@@ -102,7 +102,7 @@ def lat6090_climatology(data_dir, data_name, output_file, output_anom, years, va
     )
 
     df_all[f'{df_varname}_anom'] = df_all[df_varname] - df_all['mean']
-    df_all = df_all.drop(columns=["number"])
     df_all.to_parquet(output_anom, index=False)
     print(f"has saved daily-climatology anomaly: {output_anom}")
     return df_all, clim_stats
+
