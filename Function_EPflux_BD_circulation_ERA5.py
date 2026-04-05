@@ -58,24 +58,6 @@ def mask_poles(da, lat_name="latitude", pole_lat=89.5):
     return da.where(np.abs(lat) < pole_lat)
     
 # ========== single year processing ==========
-def vertical_gradient(var, z):
-    dvar_mid = var[:, 2:, :] - var[:, :-2, :]
-    dz_mid = z[:, 2:, :] - z[:, :-2, :]
-    grad_mid = dvar_mid / dz_mid
-
-    grad = np.zeros_like(var)
-    grad[:, 1:-1, :] = grad_mid
-    grad[:, 0, :] = (var[:, 1, :] - var[:, 0, :]) / (z[:, 1, :] - z[:, 0, :])
-    grad[:, -1, :] = (var[:, -1, :] - var[:, -2, :]) / (z[:, -1, :] - z[:, -2, :])
-    return grad
-
-def mask_poles(da, lat_name="latitude", pole_lat=89.5):
-    """
-    Mask polar points (|lat| >= pole_lat) by NaN
-    """
-    lat = da[lat_name]
-    return da.where(np.abs(lat) < pole_lat)
-
 def process_year(y):
     print(f"[INFO] Processing year {y}", flush=True)
 
