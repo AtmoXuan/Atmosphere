@@ -32,26 +32,6 @@ chunk_time = 'auto'
 small = 1e-12
 
 # ========== Utility functions ==========
-def compute_theta(T_da, plevel):
-    """ Calculate potential temperature: theta"""
-    p_pa = plevel * 100.0
-    exponent = Rd / cp
-    theta = T_da * (p0 / p_pa) ** exponent
-    theta.name = 'theta'
-    return theta
-
-def compute_density(T_da, plevel):
-    """ According to ERA5 T and pressure_level, calculate density: rho"""
-    rho_vals = np.zeros_like(T_da.values)
-    for i, p_hPa in enumerate(plevel.values):
-        p_Pa = p_hPa * 100.0
-        rho_vals[:, i, :] = p_Pa / (Rd * T_da.isel(pressure_level=i).values)
-    return xr.DataArray(rho_vals, coords=T_da.coords, dims=T_da.dims, name='rho')
-
-def pressure_to_height(GP):
-    """ According to ERA5 GP and g, calculate GPH to represent height """
-    return GP / g
-
 def vertical_gradient(var, z):
     """
     calculate d(var)/dz
@@ -69,148 +49,178 @@ def vertical_gradient(var, z):
     # top boundary
     grad[:, -1, :] = (var[:, -1, :] - var[:, -2, :]) / (z[:, -1, :] - z[:, -2, :])
     return grad
-
+    
+def mask_poles(da, lat_name="latitude", pole_lat=89.5):
+    """
+    Mask polar points (|lat| >= pole_lat) by NaN
+    """
+    lat = da[lat_name]
+    return da.where(np.abs(lat) < pole_lat)
+    
 # ========== single year processing ==========
+def vertical_gradient(var, z):
+    dvar_mid = var[:, 2:, :] - var[:, :-2, :]
+    dz_mid = z[:, 2:, :] - z[:, :-2, :]
+    grad_mid = dvar_mid / dz_mid
+
+    grad = np.zeros_like(var)
+    grad[:, 1:-1, :] = grad_mid
+    grad[:, 0, :] = (var[:, 1, :] - var[:, 0, :]) / (z[:, 1, :] - z[:, 0, :])
+    grad[:, -1, :] = (var[:, -1, :] - var[:, -2, :]) / (z[:, -1, :] - z[:, -2, :])
+    return grad
+
+def mask_poles(da, lat_name="latitude", pole_lat=89.5):
+    """
+    Mask polar points (|lat| >= pole_lat) by NaN
+    """
+    lat = da[lat_name]
+    return da.where(np.abs(lat) < pole_lat)
+
 def process_year(y):
     print(f"[INFO] Processing year {y}", flush=True)
 
-    fnT = pattern_T.format(y=y)
-    fnZ = pattern_Z.format(y=y)
-    fnU = pattern_U.format(y=y)
-    fnV = pattern_V.format(y=y)
-    fnW = pattern_W.format(y=y)
-
-    for fn in (fnT, fnZ, fnU, fnV, fnW):
-        if not os.path.exists(fn):
-            raise FileNotFoundError(f"缺少文件: {fn}")
-    
-    chunks = {'valid_time': chunk_time} if use_dask else None  # 不使用 dask  # 
-    dsT = xr.open_dataset(fnT, chunks=chunks)
-    dsZ = xr.open_dataset(fnZ, chunks=chunks)
-    dsU = xr.open_dataset(fnU, chunks=chunks)
-    dsV = xr.open_dataset(fnV, chunks=chunks)
-    dsW = xr.open_dataset(fnW, chunks=chunks)
-    ds = xr.merge([dsT, dsZ, dsU, dsV, dsW], compat='override')
-    # ds = ds.sel(latitude=slice(90,-90), pressure_level=slice(1000,1))
-    lat = ds['latitude']
-    lat_rad = np.deg2rad(lat)
-    f = 2 * Omega * np.sin(lat_rad)
-    cosphi = np.cos(lat_rad)
-
-    # potential temperature, density, height 
-    theta = compute_theta(ds['t'], ds['pressure_level'])
-    ds['theta'] = theta
+    fnT, fnZ, fnU, fnV, fnW = [p.format(y=y) for p in [pattern_T, pattern_Z, pattern_U, pattern_V, pattern_W]]
+    chunks = {'valid_time': chunk_time} if use_dask else None 
+    ds = xr.merge([xr.open_dataset(f, chunks=chunks) for f in [fnT, fnZ, fnU, fnV, fnW]], compat='override')
+    ds = ds.sel(pressure_level=slice(1000, 1)).dropna(dim='pressure_level', how='all')   
+    p_pa = ds['pressure_level'] * 100.0
+    ds['theta'] = ds['t'] * (p0 / p_pa)**(Rd/cp)
     ds_zm = ds.mean(dim='longitude')
-    z_da = pressure_to_height(ds_zm['z'])
-    z_vals = z_da.values
-    rho_da = compute_density(ds_zm['t'], ds['pressure_level'])
-    rho_vals = rho_da.values
+    
+    common_coords = ds_zm.coords
+    common_dims = ds_zm.dims
+    lat_rad_val = np.deg2rad(ds_zm['latitude'].values)
+    
+    ntime, nlev, nlat = ds_zm['t'].shape
+    cosphi = np.cos(lat_rad_val)
+    f = 2 * Omega * np.sin(lat_rad_val)
+    cos3d = np.broadcast_to(cosphi[np.newaxis, np.newaxis, :], (ntime, nlev, nlat))
+    f3d   = np.broadcast_to(f[np.newaxis, np.newaxis, :], (ntime, nlev, nlat))
 
-    ntime, nlev, nlat = ds_zm['theta'].shape
-    dtheta_dz_vals = vertical_gradient(ds_zm['theta'].values, z_vals)
-    du_dz_vals     = vertical_gradient(ds_zm['u'].values, z_vals)
-    dtheta_dz_vals = np.where(abs(dtheta_dz_vals) < small, np.sign(dtheta_dz_vals) * small + small, dtheta_dz_vals)
+    u_zm = ds_zm['u'].values
+    v_zm = ds_zm['v'].values
+    w_pa_s = ds_zm['w'].values
+    t_zm = ds_zm['t'].values
+    theta_zm = ds_zm['theta'].values
+    z_vals = (ds_zm['z'] / g).values    # GPH
+    plev_pa = ds_zm['pressure_level'].values * 100.0
+    rho_vals = plev_pa[None, :, None] / (Rd * t_zm)
 
-    cos3d = np.broadcast_to(cosphi.values[np.newaxis, np.newaxis, :], (ntime,nlev,nlat))
-    f3d   = np.broadcast_to(f.values[np.newaxis, np.newaxis, :], (ntime,nlev,nlat))
-    ducos3d_dphi_vals = np.gradient(ds_zm['u'].values * cos3d, lat_rad.values, axis=2, edge_order=1)
+    #  Pa/s => m/s
+    # omega = -rho * g * w => w = -omega / (rho * g)
+    w_zm = - w_pa_s / (rho_vals * g)
 
-    # ---- eddies ----
+    dtheta_dz_vals = vertical_gradient(theta_zm, z_vals)
+    dtheta_dz_vals = np.where(np.abs(dtheta_dz_vals) < small, np.sign(dtheta_dz_vals) * small + small, dtheta_dz_vals)
+    du_dz_vals     = vertical_gradient(u_zm, z_vals)
+    
+    ducos3d_dphi_vals = np.gradient(u_zm * cos3d, lat_rad_val, axis=2, edge_order=1)
+    dtheta_dphi_vals  = np.gradient(theta_zm, lat_rad_val, axis=2, edge_order=1)
+
     u_eddy      = ds['u'] - ds_zm['u']
     v_eddy      = ds['v'] - ds_zm['v']
-    w_eddy      = ds['w'] - ds_zm['w']
     theta_eddy  = ds['theta'] - ds_zm['theta']
 
-    uv_eddy      = (u_eddy * v_eddy).mean(dim='longitude')
-    vtheta_eddy  = (v_eddy * theta_eddy).mean(dim='longitude')
-    uw_eddy      = (u_eddy * w_eddy).mean(dim='longitude')
+    rho_4d  = p_pa / (Rd * ds['t'])      
+    w_m_s_4d = - ds['w'] / (rho_4d * g)  
+    w_eddy = w_m_s_4d - w_m_s_4d.mean(dim='longitude')
 
-    # ---- EP Flux ----
-    uv_vals     = uv_eddy.values
-    vtheta_vals = vtheta_eddy.values
-    uw_vals     = uw_eddy.values
+    uv_vals      = (u_eddy * v_eddy).mean(dim='longitude').values
+    vtheta_vals  = (v_eddy * theta_eddy).mean(dim='longitude').values
+    uw_vals      = (u_eddy * w_eddy).mean(dim='longitude').values
 
+    # EP Flux & Refractive Index 
     F_phi_vals = rho_vals * r * cos3d * (du_dz_vals * vtheta_vals / dtheta_dz_vals - uv_vals)
     F_z_vals   = rho_vals * r * cos3d * ((f3d - ducos3d_dphi_vals / (r * cos3d)) * vtheta_vals / dtheta_dz_vals - uw_vals)
 
-    # divF_y： meridional divergence ∂(Fφ cosφ)/∂φ
-    dFphi_cos_dphi = np.gradient(F_phi_vals * cos3d, lat_rad.values, axis=2, edge_order=1)
-    # divF_z： vertical divergence ∂Fz/∂z 
+    dFphi_cos_dphi = np.gradient(F_phi_vals * cos3d, lat_rad_val, axis=2, edge_order=1)
     dFz_dz = vertical_gradient(F_z_vals, z_vals)
-    # EP Flux divergence
-    divF = dFphi_cos_dphi/(r*cos3d) + dFz_dz
-    # wave-induced acceleration
-    dudt = divF / (r * cos3d * rho_vals)
+    divF = dFphi_cos_dphi / (r * cos3d) + dFz_dz
+    wave_forcing = divF / (r * cos3d * rho_vals)
 
-    # ---- TEM residual circulation ----
-    A = vtheta_vals / dtheta_dz_vals
-    v_resi = ds_zm['v'].values - vertical_gradient((rho_vals * A), z_vals) / rho_vals
-    w_resi = ds_zm['w'].values + np.gradient(cos3d * A, lat_rad.values, axis=2) / (r * cos3d)
-    w_resi_da = xr.DataArray(w_resi, coords=ds_zm['w'].coords, dims=ds_zm['w'].dims, name='w_resi')
-    if 90.0 in w_resi_da.latitude.values:
-        w_resi_da.loc[:, :, 90.0] = np.nan
-    if -90.0 in w_resi_da.latitude.values:
-        w_resi_da.loc[:, :, -90.0] = np.nan
-    omega_res = - rho_vals * g * w_resi_da
-    ad_heating = - w_resi_da * dtheta_dz_vals
+    # wave refractive index
+    N_squre_vals = np.maximum((g / theta_zm) * dtheta_dz_vals, 1e-10)  
+    Long1 = np.gradient(ducos3d_dphi_vals / cos3d, lat_rad_val, axis=2, edge_order=1)
+    Long2 = vertical_gradient((rho_vals * du_dz_vals) / N_squre_vals, z_vals)
+    q_phi = 2 * Omega * cos3d / r - Long1 / r**2 - (f3d**2 / rho_vals) * Long2 
     
-    # ========== Save ==========
-    xr.Dataset({'uv_eddy': uv_eddy, 'vtheta_eddy': vtheta_eddy, 'uw_eddy': uw_eddy}).to_netcdf(os.path.join(out_dir, f'ERA5_eddies_{y}.nc'))
-    xr.Dataset({'rho': rho_da}).to_netcdf(os.path.join(out_dir, f'ERA5_air_density_{y}.nc'))
-    ds_ep = xr.Dataset(
-    {
-        'F_phi': xr.DataArray(
-            F_phi_vals,
-            coords={
-                'valid_time': ds_zm.valid_time,
-                'pressure_level': ds_zm.pressure_level,
-                'latitude': ds_zm.latitude,
-            },
-            dims=('valid_time','pressure_level','latitude')
-        ),
-        'F_z': xr.DataArray(
-            F_z_vals,
-            coords={
-                'valid_time': ds_zm.valid_time,
-                'pressure_level': ds_zm.pressure_level,
-                'latitude': ds_zm.latitude,
-            },
-            dims=('valid_time','pressure_level','latitude')
-        ),
-        'divF': xr.DataArray(
-            divF,
-            coords={
-                'valid_time': ds_zm.valid_time,
-                'pressure_level': ds_zm.pressure_level,
-                'latitude': ds_zm.latitude,
-            },
-            dims=('valid_time','pressure_level','latitude')
-        ),
-        'dudt': xr.DataArray(
-            dudt,
-            coords={
-                'valid_time': ds_zm.valid_time,
-                'pressure_level': ds_zm.pressure_level,
-                'latitude': ds_zm.latitude,
-            },
-            dims=('valid_time','pressure_level','latitude')
-        )
-    },
-    attrs={'description': 'EP Flux and tendency fields'}
-)
-    ds_ep['F_phi'].attrs.update({'long_name':'Meridional EP Flux', 'units':'kg m s^-2'})
-    ds_ep['F_z'].attrs.update({'long_name':'Vertical EP Flux', 'units':'kg m s^-2'})
-    ds_ep['divF'].attrs.update({'long_name':'EP Flux Divergence', 'units':'kg m^-2 s^-2'})
-    ds_ep['dudt'].attrs.update({'long_name':'Wave-forcing', 'units':'m s^-2'})
-    ds_ep.to_netcdf(os.path.join(out_dir, f'ERA5_EPFlux_{y}.nc'))
+    u_stable = np.where(np.abs(u_zm) < 0.1, 0.1, u_zm)
+    H_scale = Rd * t_zm / g
+    def get_nk2(k_val):
+        return q_phi / u_stable - (k_val / (r * cos3d))**2 - f3d**2 / (4 * N_squre_vals * H_scale**2)
+    
+    n1_squre = get_nk2(1)
+    n2_squre = get_nk2(2)
 
-    xr.Dataset({'v_resi': (('valid_time','pressure_level','latitude'), v_resi),
-                'w_resi': w_resi_da,
-                'omega_res': omega_res,
-                'ad_heating': ad_heating
-               }).to_netcdf(os.path.join(out_dir, f'ERA5_TEM_{y}.nc'))
+    # TEM & Heating 
+    A = vtheta_vals / dtheta_dz_vals
+    v_resi = v_zm - vertical_gradient((rho_vals * A), z_vals) / rho_vals
+    w_resi = w_zm + np.gradient(cos3d * A, lat_rad_val, axis=2) / (r * cos3d)   
+    
+    # Pa/s 
+    omega_res = - rho_vals * g * w_resi
+    hor_adv   = - (v_resi / r) * dtheta_dphi_vals
+    ad_heating = - w_resi * dtheta_dz_vals
+
+    # K/s
+    dyn_heating = (t_zm / theta_zm) * (hor_adv + ad_heating)
+
+    # save
+    ds_save_eddy = xr.Dataset({
+        'uv_eddy':(common_dims, uv_vals),
+        'vtheta_eddy':(common_dims, vtheta_vals),
+        'uw_eddy':(common_dims, uw_vals)
+    }, coords=common_coords)
+    
+    ds_save_air = xr.Dataset({'rho': (common_dims, rho_vals)}, coords=common_coords)
+
+    ds_save_ep = xr.Dataset({
+        'F_phi': (common_dims, F_phi_vals),
+        'F_z': (common_dims, F_z_vals),
+        'divF': (common_dims, divF),
+        'wave_forcing': (common_dims, wave_forcing),
+        'n1_squre': (common_dims, n1_squre),
+        'n2_squre': (common_dims, n2_squre)
+    }, coords=common_coords)
+
+    ds_save_tem = xr.Dataset({
+        'v_resi': (common_dims, v_resi),
+        'w_resi': (common_dims, w_resi),
+        'omega_res': (common_dims, omega_res),
+        'ad_heating': (common_dims, ad_heating),
+        'dyn_heating': (common_dims, dyn_heating)
+    }, coords=common_coords)
+
+    # rho
+    ds_save_air['rho'].attrs = {'long_name': 'Air density', 'units': 'kg m-3'}
+    
+    # EP Flux 
+    ds_save_ep['F_phi'].attrs = {'long_name': 'Meridional component of EP flux', 'units': 'kg m-1 s-2'}
+    ds_save_ep['F_z'].attrs = {'long_name': 'Vertical component of EP flux', 'units': 'kg m-1 s-2'}
+    ds_save_ep['divF'].attrs = {'long_name': 'Divergence of EP flux', 'units': 'kg m-2 s-2'}
+    ds_save_ep['wave_forcing'].attrs = {'long_name': 'Wave forcing (divF / rho*r*cosphi)', 'units': 'm s-2'}
+    ds_save_ep['n1_squre'].attrs = {'long_name': 'Squared refractive index for wavenumber 1', 'units': 'None'}
+    ds_save_ep['n2_squre'].attrs = {'long_name': 'Squared refractive index for wavenumber 2', 'units': 'None'}
+
+    # TEM 
+    ds_save_tem['v_resi'].attrs = {'long_name': 'Residual meridional velocity (v*)', 'units': 'm s-1'}
+    ds_save_tem['w_resi'].attrs = {'long_name': 'Residual vertical velocity (w*)', 'units': 'm s-1'}
+    ds_save_tem['omega_res'].attrs = {'long_name': 'Residual vertical velocity in pressure coord', 'units': 'Pa s-1'}
+    ds_save_tem['ad_heating'].attrs = {'long_name': 'Adiabatic heating term', 'units': 'K s-1'}
+    ds_save_tem['dyn_heating'].attrs = {'long_name': 'Dynamical heating rate', 'units': 'K s-1'}
+    
+    for ds_final, name in zip([ds_save_eddy, ds_save_air, ds_save_ep, ds_save_tem], ['Eddies', 'Air_Density', 'EPFlux', 'TEM']):
+        # Mask poles
+        for var in ds_final.data_vars:
+            ds_final[var] = mask_poles(ds_final[var])
+        
+        # ds_final = ds_final.astype(np.float32)
+
+        out_name = f'ERA5_{name}_{y}.nc'
+        ds_final.to_netcdf(os.path.join(out_dir, out_name))
+
     print(f"[INFO] Year {y} saved successfully.")
- 
+
 # ========== Batch processing ==========
 Parallel(n_jobs=4)(
     delayed(process_year)(y) for y in range(1986, 2025)
